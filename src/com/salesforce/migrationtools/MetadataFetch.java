@@ -71,7 +71,7 @@ public class MetadataFetch {
 		MetadataFetch sample = new MetadataFetch();
 		
 		if (args.length < 2) {
-			System.out.println("Usage parameters: <property file path> <fetch property path>");
+			System.out.println("Usage parameters: <org property file path> <fetch property path>");
 			System.out.println("Example: c:\\temp\\migration\\test.properties c:\\temp\\migration\\fetch.properties - will fetch the items defined in the fetch.properties file from the org "
 			+ "specified in the file c:\\temp\\migration\\test.properties and put them in the target directory specified in the properties file, subfolder 'retrieved'");
 			System.out.println("if metadataitems property is blank in the fetch-file - will fetch all metadata from the org specified in test.properties.");
