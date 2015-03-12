@@ -519,10 +519,24 @@ public class Utils {
 	}
 	
 	public static Properties initProps(String propFilename) {
-		Properties prop = new Properties();
+		Properties prop = null;
 		try {
 			// load a properties file for reading
+			prop = new Properties();
 			prop.load(new FileInputStream(propFilename));
+		} catch (IOException ex) {
+			ex.printStackTrace();
+		}
+
+		return prop;
+	}
+	
+	public static Properties initProps(File f) {
+		Properties prop = null;
+		try {
+			// load a properties file for reading
+			prop = new Properties();
+			prop.load(new FileInputStream(f));
 		} catch (IOException ex) {
 			ex.printStackTrace();
 		}
