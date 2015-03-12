@@ -108,10 +108,10 @@ public class MetadataFetch {
 			}
 		}
 		
-		srcUrl = sourceProps.getProperty("serverurl") + urlBase + sourceProps.getProperty("apiversion");
+		myApiVersion = sourceProps.getProperty("apiversion") == null ? API_VERSION : Double.parseDouble(sourceProps.getProperty("apiversion"));
+		srcUrl = sourceProps.getProperty("serverurl") + urlBase + myApiVersion;
 		srcUser = sourceProps.getProperty("username");
 		srcPwd = sourceProps.getProperty("password");
-		myApiVersion = sourceProps.getProperty("apiversion") == null ? API_VERSION : Double.parseDouble(sourceProps.getProperty("apiversion"));
 		myMaxItems = fetchProps.getProperty("maxItems") == null ? MAX_ITEMS : Integer.parseInt(fetchProps.getProperty("maxItems"));
 		myUnzip = fetchProps.getProperty("unzip") == null ? UNZIP : fetchProps.getProperty("unzip");
 		this.targetDir = Utils.checkPathSlash(Utils.checkPathSlash(fetchProps.getProperty("targetdirectory")) + "retrieved");
@@ -156,7 +156,7 @@ public class MetadataFetch {
 		HashMap<String, ArrayList<String>> retval = new HashMap<String, ArrayList<String>>();
 		try {
 			
-			ArrayList<String> foldersToProcess = new ArrayList<String>();
+			ArrayList<FileProperties> foldersToProcess = new ArrayList<FileProperties>();
 			boolean isFolder = false;
 			// check if what we have here is in folders
 			
@@ -165,7 +165,7 @@ public class MetadataFetch {
 				isFolder = true;
 				System.out.println(metadataType + " is stored in folders. Getting folder list.");
 				ListMetadataQuery query = new ListMetadataQuery();
-				// // stupid hack for emailtemplate folder name
+				// stupid hack for emailtemplate folder name
 				String type;
 				if (metadataType.toLowerCase().equals("emailtemplate")) {
 					type = "EmailFolder";
@@ -174,28 +174,30 @@ public class MetadataFetch {
 				}
 				
 				query.setType(type);
-				FileProperties[] srcMd = srcMetadataConnection.listMetadata(new ListMetadataQuery[] { query }, Double.parseDouble(sourceProps.getProperty("apiversion")));
+				FileProperties[] srcMd = srcMetadataConnection.listMetadata(new ListMetadataQuery[] { query }, myApiVersion);
 				if (srcMd != null && srcMd.length > 0) {
 					for (FileProperties n : srcMd) {
-						foldersToProcess.add(n.getFullName());
+						foldersToProcess.add(n);
 					}
 				}
 			}
 			
-			Iterator<String> folder = foldersToProcess.iterator();
+			Iterator<FileProperties> folder = foldersToProcess.iterator();
 			
 			HashMap<String, ArrayList<FileProperties>> metadataMap = new HashMap<String, ArrayList<FileProperties>>();
 			
 			int numfetches = 0;
 			int itemCount = 0;
 			
-			do {
 			
+			do {
+				FileProperties folderProperties = null;
 				ListMetadataQuery query = new ListMetadataQuery();
 				query.setType(metadataType);
 				String folderName = null;
 				if (isFolder) {
-					folderName = folder.next();
+					folderProperties = folder.next(); 
+					folderName = folderProperties.getFullName();
 					query.setFolder(folderName);
 				}
 				
@@ -204,9 +206,14 @@ public class MetadataFetch {
 				// generate full metadata inventory
 				
 				
-				FileProperties[] srcMd = srcMetadataConnection.listMetadata(new ListMetadataQuery[] { query }, Double.parseDouble(sourceProps.getProperty("apiversion")));
+				FileProperties[] srcMd = srcMetadataConnection.listMetadata(new ListMetadataQuery[] { query }, myApiVersion);
 				if (folderName != null) {
 					System.out.printf("%-80.80s","Processing folder: " + folderName + " ");
+					// fetch folders themselves
+					ArrayList<FileProperties> filenameList = new ArrayList<FileProperties>();
+					filenameList.add(folderProperties);
+					metadataMap.put(folderProperties.getFileName(), filenameList);
+					itemCount++;
 				}
 				itemCount += srcMd.length;
 				System.out.println("Metadata items: " + srcMd.length + "\tCurrent total: " + itemCount);
@@ -235,7 +242,7 @@ public class MetadataFetch {
 				if (isFolder == true && folder.hasNext()) {
 					continue;
 				}
-				
+
 				// now start pulling things off the metadataMap and fetching in chunks
 				
 				ArrayList<FileProperties> srcMdList = new ArrayList<FileProperties> ();
@@ -319,7 +326,18 @@ public class MetadataFetch {
 		PackageTypeMembers pdi = new PackageTypeMembers();
 		for (FileProperties n : srcMdMap) {				
             names.add(n.getFullName());
-            pdi.setName(n.getType());
+            
+			// stupid hack for emailtemplate folder name
+			String type = "";
+			if (metadataType.toLowerCase().equals("emailfolder")) {
+				type = "EmailTemplate";
+			} else if (metadataType.equals("DocumentFolder") ||
+					metadataType.equals("ReportFolder") ||
+					metadataType.equals("DashboardFolder")){
+				type = metadataType.substring(0, metadataType.indexOf("Folder"));
+			}
+			
+            pdi.setName(type == "" ? n.getType() : type);
 		}
 		
 		if (pdi != null && pdi.getName() != null && pdi.getName().equals("Flow")) {
