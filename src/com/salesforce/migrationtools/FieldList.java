@@ -67,9 +67,9 @@ public class FieldList {
 		srcUrl = sourceProps.getProperty("serverurl") + urlBase + myApiVersion;
 		srcUser = sourceProps.getProperty("username");
 		srcPwd = sourceProps.getProperty("password");
-		lookupfiles = fetchProps.getProperty("lookupfiles") == "1" ? true : false;
-		nonlookupfiles = fetchProps.getProperty("nonlookupfiles") == "1" ? true : false;
-		allfiles = fetchProps.getProperty("allfiles") == "1" ? true : false;
+		lookupfiles = fetchProps.getProperty("lookupfiles").equals("1") ? true : false;
+		nonlookupfiles = fetchProps.getProperty("nonlookupfiles").equals("1") ? true : false;
+		allfiles = fetchProps.getProperty("allfiles").equals("1") ? true : false;
 
 		outputDir = Utils.checkPathSlash(fetchProps.getProperty("targetdirectory"));
 
