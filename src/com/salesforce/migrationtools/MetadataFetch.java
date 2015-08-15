@@ -374,7 +374,7 @@ public class MetadataFetch {
                 "by MAX_NUM_POLL_REQUESTS is sufficient.");
             }
             result = srcMetadataConnection.checkRetrieveStatus(
-                    asyncResultId);
+                    asyncResultId, false);
             System.out.println("Retrieve Status: " + result.getStatus());
         } while (!result.isDone());
 
