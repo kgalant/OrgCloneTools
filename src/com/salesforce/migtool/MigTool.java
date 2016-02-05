@@ -148,9 +148,12 @@ public class MigTool {
 					
 					Pattern filenamePattern = Pattern.compile("(.*?)(\\w*\\.zip).*");
 					Matcher m = filenamePattern.matcher(outputDir);
-					outputDir = m.group(1);
-					outputFilename = m.group(2);
-					Utils.checkDir(outputDir);
+					if (m.matches()) {
+						outputDir = m.group(1);
+						outputFilename = m.group(2);
+						Utils.checkDir(outputDir);	
+					}
+					
 				} else {
 					Utils.checkDir(outputDir);
 				}
