@@ -1,8 +1,9 @@
 /**
  * 
  */
-package com.salesforce.migrationtools;
+package com.salesforce.migtool;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -11,6 +12,9 @@ import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -21,13 +25,21 @@ import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 import org.xml.sax.SAXException;
 
+import com.salesforce.migrationtools.MetadataLoginUtil;
 import com.sforce.soap.metadata.AsyncResult;
+import com.sforce.soap.metadata.CodeCoverageWarning;
+import com.sforce.soap.metadata.DeployDetails;
+import com.sforce.soap.metadata.DeployMessage;
+import com.sforce.soap.metadata.DeployOptions;
+import com.sforce.soap.metadata.DeployResult;
 import com.sforce.soap.metadata.MetadataConnection;
 import com.sforce.soap.metadata.PackageTypeMembers;
 import com.sforce.soap.metadata.RetrieveMessage;
 import com.sforce.soap.metadata.RetrieveRequest;
 import com.sforce.soap.metadata.RetrieveResult;
 import com.sforce.soap.metadata.RetrieveStatus;
+import com.sforce.soap.metadata.RunTestFailure;
+import com.sforce.soap.metadata.RunTestsResult;
 import com.sforce.ws.ConnectionException;
 
 /**
@@ -46,6 +58,8 @@ public class MetadataOps {
 	private static final String APIVERSION_PROPSKEY = "apiversion";
 	private static final String POLLWAIT_PROPSKEY = "pollWaitMillis";
 	private static final String POLLREQS_PROPSKEY = "maxPoll";
+	
+	private static final Logger logger = LogManager.getLogger("MyLogger");
 	
 	public MetadataOps (MetadataConnection c, int pollRequests, int pollInterval) throws Exception {
 		if (c == null) {
@@ -66,9 +80,29 @@ public class MetadataOps {
 		MAX_NUM_POLL_REQUESTS = Integer.parseInt(props.getProperty(POLLREQS_PROPSKEY, MAX_NUM_POLL_REQUESTS + ""));
 		POLLINTERVAL = Integer.parseInt(props.getProperty(POLLWAIT_PROPSKEY, POLLINTERVAL + ""));
 		mdConnection = MetadataLoginUtil.mdLogin(props);
+		logger.debug("Creating connection from Properties file.");
 	}
 	
+	public void deployZip(String filename) throws Exception {
+		logger.error("Asked to deploy " + filename);
+        byte zipBytes[] = readZipFile(filename);
+        DeployOptions deployOptions = new DeployOptions();
+        deployOptions.setPerformRetrieve(false);
+        deployOptions.setRollbackOnError(true);
+        AsyncResult asyncResult = mdConnection.deploy(zipBytes, deployOptions);
+        DeployResult result = waitForDeployCompletion(asyncResult.getId());
+        if (!result.isSuccess()) {
+            printErrors(result, "Final list of failures:\n");
+            throw new Exception("The files were not successfully deployed");
+        }
+        System.out.println("The file " + filename + " was successfully deployed\n");
+    }
+
 	public void retrieveZip(String manifestFilename, String outputFilename) throws Exception {
+		logger.error("Asked to retrieve " + manifestFilename + " into " + outputFilename);
+		
+		// TODO: put in manifest lister here for debug output
+		
         RetrieveRequest retrieveRequest = new RetrieveRequest();
         // The version in package.xml overrides the version in RetrieveRequest
 
@@ -107,12 +141,11 @@ public class MetadataOps {
     private void setUnpackaged(RetrieveRequest request, String manifestFilename) throws Exception {
         // Edit the path, if necessary, if your package.xml file is located elsewhere
         File unpackedManifest = new File(manifestFilename);
-        System.out.println("Manifest file: " + unpackedManifest.getAbsolutePath());
+        logger.debug("Manifest file: " + unpackedManifest.getAbsolutePath());
 
         if (!unpackedManifest.exists() || !unpackedManifest.isFile()) {
             throw new Exception("Should provide a valid retrieve manifest " +
-                "for unpackaged content. Looking for " +
-                unpackedManifest.getAbsolutePath());
+                "for unpackaged content. Looking for " + unpackedManifest.getAbsolutePath());
         }
 
         // Note that we use the fully qualified class name because
@@ -164,13 +197,11 @@ public class MetadataOps {
     private RetrieveResult waitForRetrieveCompletion(AsyncResult asyncResult) throws Exception {
     	// Wait for the retrieve to complete
         int poll = 0;
-        long waitTimeMilliSecs = ONE_SECOND;
+        long waitTimeMilliSecs = POLLINTERVAL;
         String asyncResultId = asyncResult.getId();
         RetrieveResult result = null;
         do {
             Thread.sleep(waitTimeMilliSecs);
-            // Double the wait time for the next iteration
-            waitTimeMilliSecs *= 2;
             if (poll++ > MAX_NUM_POLL_REQUESTS) {
                 throw new Exception("Request timed out.  If this is a large set " +
                 "of metadata components, check that the time allowed " +
@@ -180,6 +211,110 @@ public class MetadataOps {
             System.out.println("Retrieve Status: " + result.getStatus());
         } while (!result.isDone());         
 
+        return result;
+    }
+    
+    private DeployResult waitForDeployCompletion(String asyncResultId) throws Exception {
+        int poll = 0;
+        long waitTimeMilliSecs = POLLINTERVAL;
+        DeployResult deployResult;
+        boolean fetchDetails;
+        do {
+            Thread.sleep(waitTimeMilliSecs);
+            if (poll++ > MAX_NUM_POLL_REQUESTS) {
+                throw new Exception(
+                    "Request timed out. If this is a large set of metadata components, " +
+                    "ensure that MAX_NUM_POLL_REQUESTS is sufficient.");
+            }
+            // Fetch in-progress details once for every 3 polls
+            fetchDetails = (poll % 3 == 0);
+
+            deployResult = mdConnection.checkDeployStatus(asyncResultId, fetchDetails);
+            System.out.println("Status is: " + deployResult.getStatus());
+            if (!deployResult.isDone() && fetchDetails) {
+                printErrors(deployResult, "Failures for deployment in progress:\n");
+            }
+        }
+        while (!deployResult.isDone());
+
+        if (!deployResult.isSuccess() && deployResult.getErrorStatusCode() != null) {
+            throw new Exception(deployResult.getErrorStatusCode() + " msg: " +
+                    deployResult.getErrorMessage());
+        }
+        
+        if (!fetchDetails) {
+            // Get the final result with details if we didn't do it in the last attempt.
+            deployResult = mdConnection.checkDeployStatus(asyncResultId, true);
+        }
+        
+        return deployResult;
+    }
+
+    private void printErrors(DeployResult result, String messageHeader) {
+        DeployDetails details = result.getDetails();
+        StringBuilder stringBuilder = new StringBuilder();
+        if (details != null) {
+            DeployMessage[] componentFailures = details.getComponentFailures();
+            for (DeployMessage failure : componentFailures) {
+                String loc = "(" + failure.getLineNumber() + ", " + failure.getColumnNumber();
+                if (loc.length() == 0 && !failure.getFileName().equals(failure.getFullName()))
+                {
+                    loc = "(" + failure.getFullName() + ")";
+                }
+                stringBuilder.append(failure.getFileName() + loc + ":" 
+                    + failure.getProblem()).append('\n');
+            }
+            RunTestsResult rtr = details.getRunTestResult();
+            if (rtr.getFailures() != null) {
+                for (RunTestFailure failure : rtr.getFailures()) {
+                    String n = (failure.getNamespace() == null ? "" :
+                        (failure.getNamespace() + ".")) + failure.getName();
+                    stringBuilder.append("Test failure, method: " + n + "." +
+                            failure.getMethodName() + " -- " + failure.getMessage() + 
+                            " stack " + failure.getStackTrace() + "\n\n");
+                }
+            }
+            if (rtr.getCodeCoverageWarnings() != null) {
+                for (CodeCoverageWarning ccw : rtr.getCodeCoverageWarnings()) {
+                    stringBuilder.append("Code coverage issue");
+                    if (ccw.getName() != null) {
+                        String n = (ccw.getNamespace() == null ? "" :
+                        (ccw.getNamespace() + ".")) + ccw.getName();
+                        stringBuilder.append(", class: " + n);
+                    }
+                    stringBuilder.append(" -- " + ccw.getMessage() + "\n");
+                }
+            }
+        }
+        if (stringBuilder.length() > 0) {
+            stringBuilder.insert(0, messageHeader);
+            System.out.println(stringBuilder.toString());
+        }
+    }
+    
+    private byte[] readZipFile(String filename) throws Exception {
+        byte[] result = null;
+        // We assume here that you have a deploy.zip file.
+        // See the retrieve sample for how to retrieve a zip file.
+        File zipFile = new File(filename);
+        if (!zipFile.exists() || !zipFile.isFile()) {
+            throw new Exception("Cannot find the zip file for deploy() on path:"
+                + zipFile.getAbsolutePath());
+        }
+
+        FileInputStream fileInputStream = new FileInputStream(zipFile);
+        try {
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] buffer = new byte[4096];
+            int bytesRead = 0;
+            while (-1 != (bytesRead = fileInputStream.read(buffer))) {
+                bos.write(buffer, 0, bytesRead);
+            }
+
+            result = bos.toByteArray();
+        } finally {
+            fileInputStream.close();
+        }
         return result;
     }
 	

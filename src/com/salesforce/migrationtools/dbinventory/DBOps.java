@@ -6,12 +6,14 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.Properties;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.postgresql.util.PGobject;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.salesforce.migrationtools.ObjectSFData;
 import com.salesforce.migrationtools.Utils;
 
@@ -24,10 +26,15 @@ public class DBOps {
 	private static PreparedStatement columnExistsCheckStatement = null;
 	private static PreparedStatement insertObjectDataStatement = null;
 	private static PreparedStatement deleteObjectDataStatement = null;
+	private static PreparedStatement insertFieldDataStatement = null;
+	private static PreparedStatement deleteFieldDataStatement = null;
 	private static PreparedStatement getFieldDefinitionsStatement = null;
+	private static PreparedStatement selectFieldDataStatement = null;
 	
 	private static Statement columnCreateStatement = null; 
-	private static Statement tableCreateStatement = null; 
+	private static Statement tableCreateStatement = null;
+
+	 
 	
 	
 	private static final Logger logger = LogManager.getLogger("MyLogger");
@@ -38,6 +45,9 @@ public class DBOps {
 	private static final String tableCreateStatementSQL = "CREATE TABLE IF NOT EXISTS $$1$$ ( ) WITH (OIDS=FALSE)";
 	private static final String insertObjectDataSQL = "INSERT INTO fieldinventory (orgid, objectname, metadatadescription, partnerdescription) VALUES (?,?,?,?)";
 	private static final String deleteObjectDataSQL = "DELETE FROM fieldinventory WHERE orgid=? AND objectname=?";
+	private static final String insertFieldDataSQL = "INSERT INTO fieldlist (orgid, objectname, fieldname, fielddata) VALUES (?,?,?,?)";
+	private static final String deleteFieldDataSQL = "DELETE FROM fieldlist WHERE orgid=? AND objectname=? and fieldname=?";
+	private static final String selectFieldDataSQL = "SELECT fieldname FROM fieldlist WHERE orgid=? and objectname=?";
 	
 	private static final String getFieldDefinitionsSQL= 
 			"SELECT objectname, fieldname, fieldJSON->>'type' fieldtype, fieldJSON->>'length' fieldlength, fieldJSON->>'scale' fieldscale FROM (" + 
@@ -70,17 +80,27 @@ public class DBOps {
 		return successful;
 	}
 	
-	public static void initializeProps(String propFilePath) {
-		if (propFilePath != null && propFilePath.length() > 0) {
-			dbProperties = Utils.initProps(propFilePath);
-		}
-	}
-	
-	public static void initializeDB (String propFilePath) {
-		initializeProps(propFilePath);
+	public static void initializeDB (Properties dbProps) {
+		dbProperties = dbProps;
 		connect(dbProperties.getProperty("username"),
 				dbProperties.getProperty("password"),
 				dbProperties.getProperty("url"));
+		
+		DBOps.createTableInDB("dbinventory");
+		DBOps.createColumnIfNotExists("dbinventory", "orgid character varying(18)");
+		DBOps.createColumnIfNotExists("dbinventory", "orgname character varying(255)");
+
+		DBOps.createTableInDB("fieldinventory");
+		DBOps.createColumnIfNotExists("fieldinventory", "orgid character varying(18)");
+		DBOps.createColumnIfNotExists("fieldinventory", "objectname character varying(255)");
+		DBOps.createColumnIfNotExists("fieldinventory", "metadatadescription jsonb");
+		DBOps.createColumnIfNotExists("fieldinventory", "partnerdescription jsonb");
+		
+		DBOps.createTableInDB("fieldlist");
+		DBOps.createColumnIfNotExists("fieldlist", "orgid character varying(18)");
+		DBOps.createColumnIfNotExists("fieldlist", "objectname character varying(255)");
+		DBOps.createColumnIfNotExists("fieldlist", "fieldname character varying(255)");
+		DBOps.createColumnIfNotExists("fieldlist", "fielddata jsonb");
 	}
 	
 	public static boolean doesTableExist (String tablename) {
@@ -104,7 +124,7 @@ public class DBOps {
 		return retval;
 	}
 	
-	public static boolean createTable (String tablename) {
+	public static boolean createTableInDB (String tablename) {
 		boolean retval = false;
 		String myDDL = tableCreateStatementSQL.replace("$$1$$", tablename);
 		
@@ -173,7 +193,11 @@ public class DBOps {
 			columnExistsCheckStatement = myConnection.prepareStatement(columnCheckStatementSQL);
 			insertObjectDataStatement = myConnection.prepareStatement(insertObjectDataSQL);
 			deleteObjectDataStatement = myConnection.prepareStatement(deleteObjectDataSQL);
+			selectFieldDataStatement  = myConnection.prepareStatement(selectFieldDataSQL);
+			insertFieldDataStatement = myConnection.prepareStatement(insertFieldDataSQL);
+			deleteFieldDataStatement = myConnection.prepareStatement(deleteFieldDataSQL);
 			getFieldDefinitionsStatement = myConnection.prepareStatement(getFieldDefinitionsSQL);
+			
 		} catch (SQLException e) {
 			// TODO Auto-generated catch block
 			logger.error(e);
@@ -212,4 +236,170 @@ public class DBOps {
 		
 	}
 	
+	public static boolean deleteFieldListValue(String orgId, String objectName, String fieldName) {
+		boolean retval = false;
+		
+		if (insertFieldDataStatement == null || deleteFieldDataStatement == null) prepareStatements();
+		
+		try {
+			deleteFieldDataStatement.setString(1, orgId);
+			deleteFieldDataStatement.setString(2, objectName);
+			deleteFieldDataStatement.setString(3, fieldName);
+			return deleteFieldDataStatement.execute();
+		} catch (SQLException e) {
+			logger.error(e);
+		}
+		return retval;
+		
+	}
+
+	public static boolean insertFieldListValue(String orgId, String objectName, String fieldName, JsonNode fieldNode) {
+		boolean retval = false;
+		
+		if (insertFieldDataStatement == null || deleteFieldDataStatement == null) prepareStatements();
+		
+		try {
+			insertFieldDataStatement.setString(1, orgId);
+			insertFieldDataStatement.setString(2, objectName);
+			insertFieldDataStatement.setString(3, fieldName);
+			
+			PGobject describeJsonObject = new PGobject();
+			describeJsonObject.setType("jsonb");
+			describeJsonObject.setValue(fieldNode.toString());
+			insertFieldDataStatement.setObject(4, describeJsonObject);
+			
+			return insertFieldDataStatement.execute();
+		} catch (SQLException e) {
+			logger.error(e);
+		}
+		return retval;
+		
+	}
+	
+	/*
+	 * This method will create a single table based on a tablename and its JSON representation
+	 */
+	
+	public static void createTable(String orgId, String objectName, JsonNode root) {
+		
+		DBOps.createTableInDB(objectName);
+		
+		JsonNode fieldsArray = root.path("fields");
+
+		if (fieldsArray.isArray()) {
+			for (JsonNode fieldNode : fieldsArray) {
+				createFieldInDB(orgId, objectName, fieldNode);
+			}
+		}
+	}
+
+	private static void createFieldInDB(String orgId, String objectName, JsonNode fieldNode) {
+		// get name of field from JSON
+		
+		String fieldName = fieldNode.path("fullName").textValue();
+		if (fieldName == null || fieldName.length() == 0 || fieldName.equals("null")) {
+			fieldName = fieldNode.path("name").textValue();
+		}
+		String fieldDatatype = fieldNode.path("type").textValue();
+		int fieldLength = fieldNode.path("length").intValue();
+		int fieldScale = fieldNode.path("scale").intValue();
+		logger.debug("Processing field: " + fieldName + " type: " + fieldDatatype + " length: " + fieldLength + " scale: " + fieldScale);
+
+		boolean canHandleDatatype = false;
+		String columndef = "";
+		if (fieldDatatype != null) {
+			switch (fieldDatatype.toLowerCase()) {
+			case "string":
+			case "text":
+			case "phone":
+			case "url":
+			case "multipicklist":
+			case "combobox":
+				columndef = fieldName + " character varying (" + (fieldLength == 0 ? 255 : fieldLength) + ")";
+				canHandleDatatype = true;
+				break;
+			case "date":
+				columndef = fieldName + " date";
+				canHandleDatatype = true;
+				break;
+			case "datetime":
+				columndef = fieldName + " timestamp";
+				canHandleDatatype = true;
+				break;
+			case "lookup":
+			case "id":
+			case "reference":
+				columndef = fieldName + " character varying (18)";
+				canHandleDatatype = true;
+				break;
+			case "currency":
+			case "percent":
+			case "_double":
+			case "_int":
+				columndef = fieldName + " numeric (18," + fieldScale + ")";
+				canHandleDatatype = true;
+				break;
+			case "checkbox":
+			case "_boolean":
+				columndef = fieldName + " boolean";
+				canHandleDatatype = true;
+				break;
+			case "longtextarea":
+				columndef = fieldName + " character varying (" + fieldLength + ")";
+				canHandleDatatype = true;
+				break;
+			case "picklist":
+			case "email":
+			case "textarea":
+			case "address":
+				columndef = fieldName + " character varying (" + (fieldLength != 0 ? fieldLength : 255) + ")";
+				canHandleDatatype = true;
+				break;
+			case "summary":
+			case "number":
+				columndef = fieldName + " numeric (18," + (fieldScale != 0 ? fieldLength : 8) + ")";
+				canHandleDatatype = true;
+				break;
+			default:
+
+			}
+			if (!DBOps.doesColumnExist(objectName, fieldName)) {
+				if (canHandleDatatype) {
+					DBOps.createColumn(objectName, columndef);
+					logger.error("Table " + objectName + ", field " + columndef + " created.");
+				} else {
+					logger.error("Cannot handle field " + fieldName + " of data type: " + fieldDatatype);
+				}
+			} else {
+				logger.error("Table " + objectName + ", field " + columndef + " already exists.");
+			}
+			
+			// put it in the inventory table as well
+			
+			DBOps.deleteFieldListValue(orgId, objectName, fieldName);
+			DBOps.insertFieldListValue(orgId, objectName, fieldName, fieldNode);
+		}
+	}
+	
+	public static ArrayList<String> getFieldNamesForObject(String orgId, String objectName) {
+		ArrayList<String> retval = new ArrayList<String>();
+		
+		if (selectFieldDataStatement == null) prepareStatements();		
+		
+		try {
+			selectFieldDataStatement.setString(1, orgId);
+			selectFieldDataStatement.setString(2, objectName);
+			
+			ResultSet rs = selectFieldDataStatement.executeQuery();
+			
+			
+			while (rs.next()) {
+				retval.add(rs.getString(1));
+			}
+		} catch (SQLException e) {
+			logger.error(e);
+		}
+		
+		return retval;
+	}
 }

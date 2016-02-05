@@ -1,7 +1,9 @@
-package com.salesforce.migrationtools;
+package com.salesforce.migtool.tests;
 
 import java.util.Properties;
 
+import com.salesforce.migrationtools.Utils;
+import com.salesforce.migtool.MetadataOps;
 import com.sforce.ws.ConnectionException;
 
 public class MigToolTest {

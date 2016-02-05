@@ -33,6 +33,7 @@ public class FieldListComplete {
 
 	private Properties sourceProps;
 	private Properties fetchProps;
+	private Properties dbProps;
 
 	private String srcUrl;
 	private String srcUser;
@@ -51,6 +52,8 @@ public class FieldListComplete {
 	private HashMap<String, Metadata> metadataMap = new HashMap<String, Metadata>();
 	private HashMap<String, DescribeSObjectResult> describeMap = new HashMap<String, DescribeSObjectResult>();
 	private HashMap<String, ObjectSFData> objectSFDataMap = new HashMap<String, ObjectSFData>();
+	private HashMap<String, ArrayList<String>> objectQueryListMap = new HashMap<String, ArrayList<String>>();
+	
 	ArrayList<String> sortedNames = new ArrayList<String>();
 
 	String authEndPoint = "";
@@ -63,44 +66,29 @@ public class FieldListComplete {
 	private static final Logger logger = LogManager.getLogger("MyLogger");
 
 	public static void main(String[] args) throws ConnectionException {
-		if (args.length < 2) {
-			System.out.println("Usage parameters: <org property file path> <objectlist property path>");
+		if (args.length < 3) {
+			System.out.println("Usage parameters: <org property file path> <objectlist property path> <database config file path>");
 			System.out
-					.println("Example: c:\\temp\\migration\\test.properties c:\\temp\\migration\\fieldlist.properties - will output files for the objects specified to the path specified");
+					.println("Example: c:\\temp\\migration\\test.properties c:\\temp\\migration\\fieldlist.properties c:\\temp\\migration\\db.properties - will output files for the objects specified to the path specified");
 			System.out.println("Parameters not supplied - exiting.");
 			System.exit(0);
 		}
 
 		FieldListComplete sample = new FieldListComplete();
 
-		if (args.length > 0) {
+		if (args.length > 2) {
 			sample.sourceProps = Utils.initProps(args[0]);
-		}
-
-		if (args.length > 1) {
 			sample.fetchProps = Utils.initProps(args[1]);
+			sample.dbProps = Utils.initProps(args[2]);
 		}
 
-		initializeDB();
+		sample.initializeDB();
 
 		sample.run();
 	}
 
-	private static void initializeDB() {
-		DBOps.initializeDB("c:\\temp\\fieldlist\\db.properties");
-		DBOps.createTable("dbinventory");
-		DBOps.createColumnIfNotExists("dbinventory", "orgid character varying(18)");
-		DBOps.createColumnIfNotExists("dbinventory", "orgname character varying(255)");
-
-		DBOps.createTable("fieldinventory");
-		DBOps.createColumnIfNotExists("fieldinventory", "orgid character varying(18)");
-		DBOps.createColumnIfNotExists("fieldinventory", "objectname character varying(255)");
-		DBOps.createColumnIfNotExists("fieldinventory", "metadatadescription jsonb");
-		DBOps.createColumnIfNotExists("fieldinventory", "partnerdescription jsonb");
-
-		if (!DBOps.doesColumnExist("maintable", "somecolumn")) {
-			DBOps.createColumn("maintable", "somecolumn character varying(200)");
-		}
+	private void initializeDB() {
+		DBOps.initializeDB(dbProps);
 	}
 
 	public void run() throws ConnectionException {
@@ -135,7 +123,61 @@ public class FieldListComplete {
 		// storeObjectDefinitionsInDB();
 
 		createObjectTables();
+		
+		generateObjectQueries();
 
+	}
+
+	/*
+	 * This method will generate the queries needed to extract data from the SF database
+	 */
+	
+	private void generateObjectQueries() {
+		
+		HashMap<String, ArrayList<String>> queryList = new HashMap<String, ArrayList<String>>();
+		
+		for (String objectName : sortedNames) {
+			queryList.put(objectName, generateObjectQuery(objectName));
+		}		
+	}
+	
+	/*
+	 * This method generates a select all fields query based on the object name and the database field inventory
+	 */
+	
+
+	private ArrayList<String> generateObjectQuery(String objectName) {
+		final String selectPart = "SELECT Id";
+		final String fromPart = " FROM " + objectName;
+		int queryLengthLimit = 10000;
+		ArrayList<String> generatedQueries = new ArrayList<String>();
+		
+		ArrayList<String> fieldNames = DBOps.getFieldNamesForObject(orgId, objectName);
+		
+		StringBuilder query = new StringBuilder("");
+		query.append(selectPart);
+		
+		for (String fieldName : fieldNames) {
+
+			// Skip if the field is Id, we'll add that elsewhere
+			if (fieldName.equalsIgnoreCase("id"))
+				continue;
+			
+			String fieldPart = "," + fieldName;
+			// check if adding this field would take us over the character limit
+			if (query.length() + fieldPart.length() + fromPart.length() > queryLengthLimit) {
+				// finish this query, start a new one
+				query.append(fromPart);
+				generatedQueries.add(query.toString());
+				query = new StringBuilder("");
+				query.append(selectPart); 
+			} else {
+//				just add this field to the query
+				query.append(fieldPart);
+			}			
+		}
+		
+		return generatedQueries;
 	}
 
 	private void populateObjectSFMap() {
@@ -164,106 +206,22 @@ public class FieldListComplete {
 		for (String objectName : sortedNames) {
 			logger.debug("Creating: " + objectName);
 
-			DBOps.createTable(objectName);
-
-			// now get list of fields
-
 			JsonNode root = objectSFDataMap.get(objectName).getMyJson();
-
-			// System.out.println(root.toString());
-
-			JsonNode fieldsArray = root.path("fields");
-
-			if (fieldsArray.isArray()) {
-				for (JsonNode fieldNode : fieldsArray) {
-					String fieldName = fieldNode.path("fullName").textValue();
-					if (fieldName == null || fieldName.length() == 0 || fieldName.equals("null")) {
-						fieldName = fieldNode.path("name").textValue();
-					}
-					String fieldDatatype = fieldNode.path("type").textValue();
-					int fieldLength = fieldNode.path("length").intValue();
-					int fieldScale = fieldNode.path("scale").intValue();
-					logger.debug("Processing field: " + fieldName + " type: " + fieldDatatype + " length: " + fieldLength + " scale: " + fieldScale);
-
-					boolean canHandleDatatype = false;
-					String columndef = "";
-					if (fieldDatatype != null) {
-						switch (fieldDatatype.toLowerCase()) {
-						case "string":
-						case "text":
-						case "phone":
-						case "url":
-						case "multipicklist":
-						case "combobox":
-							columndef = fieldName + " character varying (" + (fieldLength == 0 ? 255 : fieldLength) + ")";
-							canHandleDatatype = true;
-							break;
-						case "date":
-							columndef = fieldName + " date";
-							canHandleDatatype = true;
-							break;
-						case "datetime":
-							columndef = fieldName + " timestamp";
-							canHandleDatatype = true;
-							break;
-						case "lookup":
-						case "id":
-						case "reference":
-							columndef = fieldName + " character varying (18)";
-							canHandleDatatype = true;
-							break;
-						case "currency":
-						case "percent":
-						case "_double":
-						case "_int":
-							columndef = fieldName + " numeric (18," + fieldScale + ")";
-							canHandleDatatype = true;
-							break;
-						case "checkbox":
-						case "_boolean":
-							columndef = fieldName + " boolean";
-							canHandleDatatype = true;
-							break;
-						case "longtextarea":
-							columndef = fieldName + " character varying (" + fieldLength + ")";
-							canHandleDatatype = true;
-							break;
-						case "picklist":
-						case "email":
-						case "textarea":
-						case "address":
-							columndef = fieldName + " character varying (" + (fieldLength != 0 ? fieldLength : 255) + ")";
-							canHandleDatatype = true;
-							break;
-						case "summary":
-						case "number":
-							columndef = fieldName + " numeric (18," + (fieldScale != 0 ? fieldLength : 8) + ")";
-							canHandleDatatype = true;
-							break;
-						default:
-
-						}
-						if (!DBOps.doesColumnExist(objectName, fieldName)) {
-							if (canHandleDatatype) {
-								DBOps.createColumn(objectName, columndef);
-								logger.error("Table " + objectName + ", field " + columndef + " created.");
-							} else {
-								logger.error("Cannot handle field " + fieldName + " of data type: " + fieldDatatype);
-							}
-						} else {
-							logger.error("Table " + objectName + ", field " + columndef + " already exists.");
-						}
-					}
-
-				}
-			}
-
+			
+			DBOps.createTable(orgId, objectName, root);		
 		}
-
 	}
+	
+	
+	
+	
 
+	/* 
+	 * This method fetches the name of the org so that it can be stored/updated in the database
+	 */
+	
 	private void getOrgParameters() {
-		// TODO Auto-generated method stub
+		
 		try {
 			GetUserInfoResult result = partnerConnection.getUserInfo();
 
@@ -276,6 +234,10 @@ public class FieldListComplete {
 		}
 
 	}
+	
+	/*
+	 * This method stores all the fetched object definitions in the database
+	 */
 
 	private void storeObjectDefinitionsInDB() {
 
@@ -285,10 +247,14 @@ public class FieldListComplete {
 			if (od != null) {
 				od.storeInDB();
 			}
-			System.out.println(od.toJSON());
+//			System.out.println(od.toJSON());
 
 		}
 	}
+	
+	/*
+	 * This method computes the number of objects that are available through the APIs
+	 */
 
 	private void computeNumberOfObjects() {
 		HashSet<String> objectNames = new HashSet<String>();
@@ -306,9 +272,13 @@ public class FieldListComplete {
 
 	}
 
+	/*
+	 * This method reads data for a given set of objects from the database
+	 */
+	
 	private void readCustomObjects(String[] objects) throws ConnectionException {
 
-		ArrayList<String[]> myFetchChunks = new ArrayList<String[]>();
+		ArrayList<String[]> myFetchChunks;
 		ArrayList<String> objectNamesMD = new ArrayList<String>();
 		ArrayList<String> objectNamesPartner = new ArrayList<String>();
 
@@ -347,13 +317,15 @@ public class FieldListComplete {
 			}
 
 		}
+		
+//		now that we know what's there, lets process the MdAPI objects
 
 		String[] objectsToProcess = new String[objectNamesMD.size() > 0 ? objectNamesMD.size() : objects.length];
 
 		logger.error("Metadata API found " + objectsToProcess.length + " objects to process.");
 		logger.error("Partner API found " + objectNamesPartner.size() + " objects to process.");
 
-		objectsToProcess = objectNamesMD.toArray(objectsToProcess);
+		objectsToProcess = objectNamesMD.size() > 0 ? objectNamesMD.toArray(objectsToProcess) :objects ;
 
 		logger.error("MdAPI Objects to process: " + objectsToProcess.length);
 
@@ -361,19 +333,7 @@ public class FieldListComplete {
 
 		int chunkSize = 10;
 
-		if (objectsToProcess.length < chunkSize) {
-			myFetchChunks.add(objects);
-		} else {
-			int counter = 0;
-			do {
-				int from = 0 + (counter * chunkSize);
-				int to = (counter + 1) * chunkSize;
-				if (to > objectsToProcess.length) {
-					to = objectsToProcess.length;
-				}
-				myFetchChunks.add(Arrays.copyOfRange(objectsToProcess, from, to));
-			} while (objectsToProcess.length > (chunkSize * ++counter));
-		}
+		myFetchChunks = getChunkList(objectsToProcess, chunkSize);
 
 		ArrayList<String> fieldStringsLookupAll = new ArrayList<String>();
 
@@ -430,27 +390,14 @@ public class FieldListComplete {
 		// now chunk the describeobjects
 
 		chunkSize = 100;
-		myFetchChunks.clear();
 		objectsProcessed = 0;
 
 		objectsToProcess = new String[objectNamesPartner.size() > 0 ? objectNamesPartner.size() : objects.length];
-		objectsToProcess = objectNamesPartner.toArray(objectsToProcess);
+		objectsToProcess = objectNamesPartner.size() > 0 ? objectNamesPartner.toArray(objectsToProcess) :objects ;
 
 		logger.error("SoapAPI Objects to process: " + objectsToProcess.length);
 
-		if (objectsToProcess.length < chunkSize) {
-			myFetchChunks.add(objects);
-		} else {
-			int counter = 0;
-			do {
-				int from = 0 + (counter * chunkSize);
-				int to = (counter + 1) * chunkSize;
-				if (to > objectsToProcess.length) {
-					to = objectsToProcess.length;
-				}
-				myFetchChunks.add(Arrays.copyOfRange(objectsToProcess, from, to));
-			} while (objectsToProcess.length > (chunkSize * ++counter));
-		}
+		myFetchChunks = getChunkList(objectsToProcess, chunkSize);
 
 		// now go get the describe results
 		for (String[] chunk : myFetchChunks) {
@@ -472,5 +419,25 @@ public class FieldListComplete {
 
 		logger.error("Objects processed: " + objectsProcessed);
 
+	}
+	
+	private ArrayList<String[]> getChunkList (String[] objectsToProcess, int chunkSize) {
+		ArrayList<String[]> myFetchChunks = new ArrayList<String[]>();
+		
+		if (objectsToProcess.length < chunkSize) {
+			myFetchChunks.add(objectsToProcess);
+		} else {
+			int counter = 0;
+			do {
+				int from = 0 + (counter * chunkSize);
+				int to = (counter + 1) * chunkSize;
+				if (to > objectsToProcess.length) {
+					to = objectsToProcess.length;
+				}
+				myFetchChunks.add(Arrays.copyOfRange(objectsToProcess, from, to));
+			} while (objectsToProcess.length > (chunkSize * ++counter));
+		}
+		
+		return myFetchChunks;
 	}
 }
